@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env
+.venv
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Data & results (adjust as needed)
+run_reports/
+cache/
+*.pkl
+*.npz
+
+# OS
+.DS_Store
+Thumbs.db
