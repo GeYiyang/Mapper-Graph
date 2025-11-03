@@ -1,0 +1,203 @@
+# -*- coding: utf-8 -*-
+# Mapper graph
+
+import os, warnings, random
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import networkx as nx
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.neighbors import NearestNeighbors
+from sklearn.cluster import KMeans
+from gudhi.cover_complex import MapperComplex
+
+# =======================
+# Fill parameters
+# =======================
+DATA_CSV     = "complete_case.csv"   # ← your data file (rows=samples, cols=features)
+RES          = 10                # ← resolution (int)
+GAIN         = 0.3               # ← gain in (0,1]
+USE_2D_FILTER = True             # True: [PCA1, kNNdist]; False: [PCA1]
+KNN_K        = 20                # k for kNN distance
+N_CLUSTERS   = 4                 # base clusters per bin
+RANDOM_STATE = 0                 # reproducibility
+
+# Plotting / pruning
+DROP_ISOLATES      = True        # drop degree-0 nodes
+MIN_COMPONENT_SIZE = 3           # drop components smaller than this
+COLOR_DIM          = 0           # 0: PCA1 (if 2D), 1: kNNdist (if 2D)
+LAYOUT             = "spring"    # "spring" or "kamada"
+
+# =======================
+# Runtime hygiene
+# =======================
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+warnings.filterwarnings("ignore", category=FutureWarning)
+np.random.seed(100); random.seed(100)
+
+# =======================
+# Helpers
+# =======================
+def cdf01(x: np.ndarray) -> np.ndarray:
+    order = np.argsort(x, kind="mergesort")
+    ranks = np.empty_like(order, dtype=float)
+    ranks[order] = np.arange(1, len(x)+1, dtype=float)
+    return (ranks - 0.5) / len(x)
+
+class AdaptiveKMeans:
+    def __init__(self, base_n_clusters=5, random_state=0, n_init=10):
+        self.base_n_clusters = int(base_n_clusters)
+        self.random_state = random_state
+        self.n_init = int(n_init)
+    def fit_predict(self, X, y=None):
+        m = X.shape[0]
+        if m <= 1:
+            return np.zeros(m, dtype=int)
+        k = min(self.base_n_clusters, m)
+        if k <= 1:
+            return np.zeros(m, dtype=int)
+        km = KMeans(n_clusters=k, random_state=self.random_state, n_init=self.n_init)
+        return km.fit_predict(X)
+
+def preprocess_filters(X: np.ndarray, use_2d=True, knn_k=20):
+    coords = StandardScaler().fit_transform(X).astype(np.float32)
+    pca1 = PCA(n_components=1, random_state=RANDOM_STATE).fit_transform(coords).ravel()
+    nn = NearestNeighbors(n_neighbors=knn_k, metric="euclidean").fit(coords)
+    dists, _ = nn.kneighbors(coords)
+    knnd = dists[:, -1]
+    pca1u = cdf01(pca1); knndu = cdf01(knnd)
+    if use_2d:
+        fil = np.vstack([pca1u, knndu]).T.astype(np.float32)
+    else:
+        fil = pca1u.reshape(-1, 1).astype(np.float32)
+    return coords, fil
+
+def build_mapper(coords: np.ndarray, filters: np.ndarray, res: int, gain: float, n_clusters: int):
+    n_filters = filters.shape[1]
+    filter_bnds = np.array([[0.0, 1.0]] * n_filters, dtype=np.float32)
+    mapper = MapperComplex(
+        filter_bnds=filter_bnds,
+        resolutions=np.array([res] * n_filters, dtype=int),
+        gains=np.array([gain] * n_filters, dtype=float),
+        clustering=AdaptiveKMeans(base_n_clusters=n_clusters, random_state=RANDOM_STATE, n_init=10),
+        input_type="point cloud",
+    )
+    mapper.fit(coords, filters=filters, colors=filters)
+    return mapper
+
+def mapper_to_networkx(M: MapperComplex) -> nx.Graph:
+    st = M.mapper_ if hasattr(M, "mapper_") else M.simplex_tree_
+    G = nx.Graph()
+    for (splx, _) in st.get_skeleton(1):
+        if len(splx) == 1: G.add_node(splx[0])
+        elif len(splx) == 2: G.add_edge(splx[0], splx[1])
+    return G
+
+def node_color_and_size_dict(M, color_dim: int = 0):
+    cs = {}
+    for k, info in M.node_info_.items():
+        # size
+        count = info.get("size", len(info.get("indices", [])))
+        size = 20.0 + 2.0 * np.sqrt(max(1.0, float(count)))
+        # color (robust)
+        c = np.asarray(info.get("colors", 0.0))
+        if c.ndim == 0:
+            val = float(c)
+        elif c.ndim == 1:
+            val = float(c[color_dim]) if c.size > color_dim else float(np.mean(c))
+        elif c.ndim == 2:
+            val = float(np.mean(c[:, color_dim])) if c.shape[1] > color_dim else float(np.mean(c))
+        else:
+            val = float(np.mean(c))
+        cs[k] = (val, size)
+
+    # normalize colors to [0,1]
+    vals = np.array([v for v, _ in cs.values()], dtype=float)
+    if np.isfinite(vals).any():
+        vmin, vmax = np.nanmin(vals), np.nanmax(vals)
+        norm = (vals - vmin) / (vmax - vmin) if vmax > vmin else np.zeros_like(vals)
+        for i, k in enumerate(cs.keys()):
+            cs[k] = (float(norm[i]), cs[k][1])
+    return cs
+
+def plot_mapper_pruned(
+    M,
+    title: str = "Mapper Graph",
+    color_dim: int = 0,
+    layout: str = "spring",
+    min_component_size: int = 3,
+    drop_isolates: bool = True,
+):
+    G = mapper_to_networkx(M)
+    cs = node_color_and_size_dict(M, color_dim=color_dim)
+
+    Gp = G.copy()
+    dropped = 0
+
+    if drop_isolates:
+        iso = list(nx.isolates(Gp))
+        Gp.remove_nodes_from(iso)
+        dropped += len(iso)
+
+    if min_component_size and min_component_size > 1:
+        for comp in list(nx.connected_components(Gp)):
+            if len(comp) < min_component_size:
+                Gp.remove_nodes_from(comp)
+                dropped += len(comp)
+
+    if Gp.number_of_nodes() == 0:
+        Gp = G
+
+    nodes = list(Gp.nodes())
+    colors = np.array([cs[n][0] for n in nodes], dtype=float)
+    sizes  = np.array([cs[n][1] for n in nodes], dtype=float)
+
+    if layout == "kamada":
+        pos = nx.kamada_kawai_layout(Gp)
+    else:
+        pos = nx.spring_layout(Gp, seed=RANDOM_STATE, iterations=150)
+
+    plt.figure(figsize=(8, 6))
+    nx.draw_networkx_edges(Gp, pos, width=1.0, alpha=0.5)
+    sc = nx.draw_networkx_nodes(
+        Gp, pos,
+        nodelist=nodes,
+        node_size=sizes,
+        node_color=colors,
+        cmap="viridis",
+        linewidths=0.3,
+        edgecolors="black",
+        alpha=0.95,
+    )
+    plt.colorbar(sc, label=f"Filter dim {color_dim}")
+    if dropped > 0:
+        plt.title(f"{title}  (pruned {dropped} nodes)")
+    else:
+        plt.title(title)
+    plt.axis("off")
+    plt.tight_layout()
+    plt.show()
+
+# =======================
+# Main
+# =======================
+if __name__ == "__main__":
+    df = pd.read_csv(DATA_CSV)
+    X = df.values.astype(np.float32)
+
+    coords, fil = preprocess_filters(X, use_2d=USE_2D_FILTER, knn_k=KNN_K)
+    M = build_mapper(coords, fil, res=RES, gain=GAIN, n_clusters=N_CLUSTERS)
+
+    plot_mapper_pruned(
+        M,
+        title="Mapper Graph",
+        color_dim=COLOR_DIM,
+        layout=LAYOUT,
+        min_component_size=MIN_COMPONENT_SIZE,
+        drop_isolates=DROP_ISOLATES,
+    )
