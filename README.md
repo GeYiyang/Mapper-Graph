@@ -1,4 +1,4 @@
-# Mapper Graph Visualizer (Gudhi + scikit-learn)
+# Mapper Graph Visualizer
 
 This repository provides a minimal, reproducible pipeline to build and visualize a **Mapper graph** from a tabular dataset (CSV).  
 It uses **StandardScaler → PCA(1) + kNN-distance** as filters and **adaptive K-Means** within Gudhi’s `MapperComplex`.  
@@ -27,19 +27,19 @@ pip install -r requirements.txt
 python mapper_graph2.py
 ```
 
-Input
+## Input
 Place your CSV in the repo root and set:
 
 DATA_CSV = "complete_case.csv" (or your filename)
 
 The script assumes rows = samples and columns = features (numeric).
 
-Output
+## Output
 A Matplotlib window showing the pruned Mapper graph (nodes colored by selected filter dimension).
 
 No files are written by default. You can save the figure via Matplotlib UI if needed.
 
-Parameters (edit at the top of mapper_graph2.py)
+## Parameters
 DATA_CSV: input CSV path.
 
 RES (int): cover resolution per filter axis.
@@ -54,7 +54,7 @@ N_CLUSTERS: base K-Means clusters per bin (adapted to sample count).
 
 RANDOM_STATE: reproducibility for PCA/layout/cluster seeding.
 
-Plotting/pruning
+## Plotting/pruning
 
 DROP_ISOLATES: drop degree-0 nodes.
 
@@ -64,7 +64,7 @@ COLOR_DIM: 0 (PCA1) or 1 (kNNdist) when using 2D filter.
 
 LAYOUT: "spring" or "kamada".
 
-Notes & Tips
+## Notes & Tips
 If your dataset is large/high-dimensional, std-scaling + PCA1 is usually robust.
 
 KNN_K affects the second filter’s contrast.
